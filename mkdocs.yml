@@ -1,0 +1,9 @@
+site_name: orbit Kubernetes platform
+site_description: Kubernetes platform for orbit on aws (dev)
+
+nav:
+  - Overview: index.md
+  - Platform components: components.md
+
+plugins:
+  - techdocs-core

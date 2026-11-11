@@ -1,0 +1,181 @@
+name: Terraform
+
+# Validation, tests against mocked providers, linting and the security scan run
+# on every push and pull request and need no cloud account.
+#
+# Plan and apply run once the repository can reach AWS:
+#   secret   AWS_ROLE_ARN       IAM role this repository assumes through GitHub OIDC
+#   variable TF_STATE_BUCKET    S3 bucket that holds the Terraform state
+# The cost estimate runs once the secret INFRACOST_API_KEY is set.
+# Until then those jobs are skipped.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Apply the changes to AWS after planning
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: eu-west-1
+  TF_IN_AUTOMATION: 'true'
+  TF_INPUT: 'false'
+  TERRAFORM_VERSION: '1.17.1'
+  TFLINT_VERSION: v0.66.0
+  TRIVY_VERSION: v0.76.2
+
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Check formatting
+        run: terraform fmt -check -recursive -diff
+
+      - name: Initialise without the state backend
+        run: terraform init -backend=false
+
+      - name: Validate
+        run: terraform validate
+
+      - name: Test against mocked providers
+        run: terraform test
+
+      - uses: terraform-linters/setup-tflint@v6
+        with:
+          tflint_version: ${{ env.TFLINT_VERSION }}
+
+      - name: Lint
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          tflint --init
+          tflint --format compact
+
+  security:
+    name: Security scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Scan the Terraform configuration
+        uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          # Use the checks built into this Trivy version, so a finding is always a change in this repository.
+          TRIVY_SKIP_CHECK_UPDATE: 'true'
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          scan-type: config
+          scan-ref: .
+          tf-vars: terraform.tfvars
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+
+  credentials:
+    name: Check credentials
+    runs-on: ubuntu-latest
+    outputs:
+      cloud: ${{ steps.check.outputs.cloud }}
+      infracost: ${{ steps.check.outputs.infracost }}
+    steps:
+      - name: See which credentials are configured
+        id: check
+        env:
+          AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
+        run: |
+          if [ -n "$AWS_ROLE_ARN" ] && [ -n "$TF_STATE_BUCKET" ]; then
+            echo "cloud=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "cloud=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Plan and apply are skipped: set the secret AWS_ROLE_ARN and the variable TF_STATE_BUCKET to enable them."
+          fi
+          if [ -n "$INFRACOST_API_KEY" ]; then
+            echo "infracost=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "infracost=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  plan:
+    name: Plan
+    needs: [validate, security, credentials]
+    if: needs.credentials.outputs.cloud == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Initialise
+        run: terraform init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
+
+      - name: Plan
+        run: terraform plan
+
+  cost:
+    name: Cost estimate
+    needs: [validate, credentials]
+    if: needs.credentials.outputs.infracost == 'true' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: infracost/actions/scan@v5
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+          path: .
+
+  apply:
+    name: Apply
+    needs: [plan]
+    if: github.event_name == 'workflow_dispatch' && inputs.apply
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Initialise
+        run: terraform init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
+
+      - name: Apply
+        run: terraform apply -auto-approve

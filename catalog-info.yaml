@@ -1,0 +1,21 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: orbit-kubernetes-platform
+  description: Kubernetes platform for orbit on aws (dev)
+  annotations:
+    github.com/project-slug: example-org/orbit-kubernetes-platform
+    backstage.io/techdocs-ref: dir:.
+  tags:
+    - terraform
+    - kubernetes
+    - aws
+    - platform
+  links:
+    - url: https://github.com/example-org/orbit-kubernetes-platform/actions/workflows/terraform.yml
+      title: Terraform pipeline
+      icon: dashboard
+spec:
+  type: infrastructure
+  lifecycle: experimental
+  owner: "group:default/platform-team"
